@@ -9,12 +9,13 @@ DAYS = 30
 BASE_LAT, BASE_LON = 41.31, 69.24
 
 MCC_STATS = {
-    "5411": {"mu": 3.0, "sigma": 0.5}, # Супермаркеты (часто, средне)
-    "5814": {"mu": 2.0, "sigma": 0.4}, # Фастфуд (часто, мало)
-    "5732": {"mu": 6.5, "sigma": 1.2}, # Электроника (редко, много)
-    "4511": {"mu": 5.5, "sigma": 0.8}, # Авиабилеты
+    "5411": {"mu": 3.0, "sigma": 0.5},
+    "5814": {"mu": 2.0, "sigma": 0.4},
+    "5732": {"mu": 6.5, "sigma": 1.2},
+    "4511": {"mu": 5.5, "sigma": 0.8},
 }
-PURPOSES = ["ME2ME", "FAMILY", "PURCHASE", "DEBT_PAYOFF"]
+
+PURPOSES = ["ME2ME", "FAMILY", "PURCHASE", "DEBT_PAYOFF", "INVESTMENT", "CHARITY"]
 
 class Client:
     def __init__(self, cid):
@@ -58,19 +59,27 @@ def generate_stochastic_data():
         
         for c in clients:
             if c.is_compromised and day >= c.compromise_day:
-                hacker_lat = c.home_lat + random.uniform(5, 15)
-                hacker_lon = c.home_lon + random.uniform(5, 15)
+                distance_shift = random.choice([random.uniform(0.1, 0.5), random.uniform(5, 15)])
+                hacker_lat = c.home_lat + distance_shift
+                hacker_lon = c.home_lon + distance_shift
                 
                 for _ in range(random.randint(2, 8)):
                     tx_time = current_date.replace(hour=random.randint(0,23), minute=random.randint(0,59))
                     is_p2p = random.random() > 0.5
+
+                    if random.random() < 0.2: 
+                        amount = round(np.random.lognormal(1.0, 0.5), 2)
+                    else:
+                        amount = round(np.random.lognormal(6.0, 1.0), 2)
+
+                    fraud_purpose = np.random.choice(PURPOSES, p=[0.1, 0.1, 0.1, 0.1, 0.5, 0.1]) if is_p2p else None
                     
                     transactions.append({
                         "transaction_id": str(uuid.uuid4()),
                         "client_id": c.id,
-                        "amount_usd": round(np.random.lognormal(6.0, 1.0), 2), 
-                        "mcc_code": "5732" if not is_p2p else None,
-                        "transfer_purpose": "INVESTMENT" if is_p2p else None,
+                        "amount_usd": amount, 
+                        "mcc_code": random.choice(["5732", "4511", "5411"]) if not is_p2p else None,
+                        "transfer_purpose": fraud_purpose,
                         "receiver_id": None,
                         "terminal_lat": hacker_lat,
                         "terminal_lon": hacker_lon,
@@ -85,18 +94,22 @@ def generate_stochastic_data():
                     hour = int(np.random.normal(c.mean_hour, 2)) % 24
                     tx_time = current_date.replace(hour=hour, minute=random.randint(0, 59))
                     
-                    if c.profile == "TRAVELER" and random.random() > 0.8:
-                        c.home_lat += random.uniform(-1, 1)
-                    
-                    lat = c.home_lat + np.random.normal(0, 0.02)
-                    lon = c.home_lon + np.random.normal(0, 0.02)
+                    if random.random() > 0.98: 
+                        lat = c.home_lat + random.uniform(2, 5)
+                        lon = c.home_lon + random.uniform(2, 5)
+                    else:
+                        if c.profile == "TRAVELER" and random.random() > 0.8:
+                            c.home_lat += random.uniform(-1, 1)
+                        lat = c.home_lat + np.random.normal(0, 0.02)
+                        lon = c.home_lon + np.random.normal(0, 0.02)
 
                     is_p2p = random.random() < 0.2
                     amount = 0
 
                     if is_p2p:
-                        purpose = random.choice(PURPOSES)
+                        purpose = np.random.choice(PURPOSES, p=[0.3, 0.2, 0.2, 0.2, 0.08, 0.02])
                         amount = round(np.random.lognormal(4.0, 1.0), 2)
+                        
                         if random.random() < 0.02: 
                             receiver = random.choice(droppers).id
                             is_fraud = 1
@@ -109,6 +122,10 @@ def generate_stochastic_data():
                         mcc = random.choice(list(MCC_STATS.keys()))
                         amount = round(np.random.lognormal(MCC_STATS[mcc]["mu"], MCC_STATS[mcc]["sigma"]), 2)
                         purpose, receiver = None, None
+                        
+                        if random.random() < 0.01:
+                            amount = amount * random.uniform(5, 10) 
+                            
                         is_fraud, scenario = 0, "Normal"
 
                     transactions.append({

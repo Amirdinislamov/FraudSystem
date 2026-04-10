@@ -34,7 +34,7 @@ def train():
     predictions = model.predict(X_test)
     
     print("-" * 50)
-    print(classification_report(y_test, predictions, target_names=['Normal', 'Fraud']))
+    print(classification_report(y_test, predictions, labels=[0, 1], target_names=['Normal', 'Fraud'], zero_division=0))
     print("-" * 50)
 
 
