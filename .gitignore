@@ -1,5 +1,14 @@
 heavy_fraud_data.csv
 ml_dataset.csv
 fraud_ml_model.pkl
-venv 
-.venv 
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# Системные файлы macOS (чтобы не мусорили в репозитории)
+.DS_Store
+
+# Кэш Питона
+__pycache__/
+*.pyc
