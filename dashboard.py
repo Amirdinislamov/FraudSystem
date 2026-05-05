@@ -64,8 +64,9 @@ def update_dashboard():
 
 if start_button and uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
+
     if len(df) > 300:
-        df = df.tail(300).reset_index(drop=True)
+        df = df.sample(300, random_state=42).sort_values('timestamp').reset_index(drop=True)
     st.session_state.results = [] 
     
     progress_bar = st.progress(0)
@@ -84,8 +85,11 @@ if start_button and uploaded_file is not None:
             "amount_usd": float(row['amount_usd']),
             "mcc_code": mcc,
             "transfer_purpose": purpose,
+            "receiver_id": str(row['receiver_id']) if pd.notna(row.get('receiver_id')) else None,
             "terminal_lat": lat,
             "terminal_lon": lon,
+            "ip_address": str(row['ip_address']) if pd.notna(row.get('ip_address')) else None,
+            "device_id": str(row['device_id']) if pd.notna(row.get('device_id')) else None,
             "timestamp": timestamp_str
         }
 

@@ -7,3 +7,4 @@ numpy==1.26.2
 streamlit==1.29.0
 plotly==5.18.0
 requests==2.31.0
+networkx==3.2.1
