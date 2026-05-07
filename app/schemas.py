@@ -48,6 +48,10 @@ class ClientProfileState(BaseModel):
     last_tx_timestamp: Optional[datetime] = None
     last_geo_lat: Optional[float] = None
     last_geo_lon: Optional[float] = None
+    # Время последней транзакции, у которой были GPS-координаты.
+    # Используется GeoVelocityRule, чтобы корректно считать elapsed
+    # между двумя geo-точками (а не до любой последней транзакции).
+    last_geo_timestamp: Optional[datetime] = None
     recent_tx_hour_count: int = 0
     time_sin_sum: float = 0.0
     time_cos_sum: float = 0.0
@@ -57,9 +61,10 @@ class ClientProfileState(BaseModel):
     last_day_date: Optional[str] = None
 
     used_transfer_purposes: Set[str] = Field(default_factory=set)
-    incoming_senders: Set[str] = Field(default_factory=set)
 
-    @field_serializer("used_transfer_purposes", "incoming_senders")
+    first_digit_counts: List[int] = Field(default_factory=lambda: [0] * 9)
+
+    @field_serializer("used_transfer_purposes")
     def serialize_set(self, value: Set[str]) -> List[str]:
         return list(value)
 

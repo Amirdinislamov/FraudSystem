@@ -67,7 +67,8 @@ def train():
         print(f"  {name:35} {imp:.3f} {bar}")
 
     print("\n🔁 Кросс-валидация (5-fold, метрика: F1)...")
-    cv_scores = cross_val_score(model, X, y, cv=StratifiedKFold(5), scoring="f1", n_jobs=-1)
+    cv = StratifiedKFold(5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(model, X, y, cv=cv, scoring="f1", n_jobs=-1)
     print(f"   F1: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
     saved = {
         "model": model,

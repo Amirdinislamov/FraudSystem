@@ -62,13 +62,15 @@ class TransactionGraph:
             device_node = f"DEV_{tx.device_id}"
             if not self.G.has_node(device_node):
                 self.G.add_node(device_node, type="device")
-            self.G.add_edge(tx.client_id, device_node, type="uses_device")
+            if not self.G.has_edge(tx.client_id, device_node):
+                self.G.add_edge(tx.client_id, device_node, type="uses_device")
 
         if tx.ip_address:
             ip_node = f"IP_{tx.ip_address}"
             if not self.G.has_node(ip_node):
                 self.G.add_node(ip_node, type="ip")
-            self.G.add_edge(tx.client_id, ip_node, type="uses_ip")
+            if not self.G.has_edge(tx.client_id, ip_node):
+                self.G.add_edge(tx.client_id, ip_node, type="uses_ip")
 
 
     def _get_transfer_graph(self) -> nx.DiGraph:
@@ -115,26 +117,31 @@ class TransactionGraph:
                 except nx.PowerIterationFailedConvergence:
                     self._pagerank_cache = {}
             self._pagerank_counter = 0
-
-
+        
+    
     def detect_cycle(self, source_id: str, target_id: str, max_depth: int = 5) -> bool:
         """
         Проверяет, образует ли перевод source→target замкнутый цикл.
-        Ищет путь target→source в transfer-подграфе. Если путь ≤ max_depth,
-        транзакция завершает цикл (паттерн Smurfing / Money Laundering).
+        Использует BFS с ограничением глубины (cutoff).
         """
         if not source_id or not target_id:
             return False
 
         tg = self._get_transfer_graph()
 
-        if not tg.has_node(source_id) or not tg.has_node(target_id):
+        if not (tg.has_node(source_id) and tg.has_node(target_id)):
             return False
 
         try:
-            path_length = nx.shortest_path_length(tg, source=target_id, target=source_id)
-            return path_length <= max_depth
-        except nx.NetworkXNoPath:
+            lengths = nx.single_source_shortest_path_length(
+                tg, source=target_id, cutoff=max_depth
+            )
+
+            return source_id in lengths
+
+        except nx.NodeNotFound:
+            return False
+        except Exception:
             return False
 
     def get_in_degree(self, client_id: str) -> int:
@@ -223,6 +230,29 @@ class TransactionGraph:
         if not tg.has_node(client_id):
             return 0
         return tg.out_degree(client_id)
+
+    def get_recent_unique_senders(
+        self, client_id: str, current_time: datetime, window_hours: int = 1
+    ) -> int:
+        """
+        Количество уникальных отправителей, которые перевели деньги
+        данному получателю за последние window_hours часов.
+
+        Эта метрика отделяет «дропперов в моменте» от просто популярных
+        получателей: даже если получатель за всю историю получал переводы
+        от десятков людей, опасным он становится тогда, когда поступления
+        от множества разных людей идут в течение короткого окна.
+        """
+        if not self.G.has_node(client_id):
+            return 0
+        cutoff = current_time - timedelta(hours=window_hours)
+        senders = set()
+        for u, v, d in self.G.in_edges(client_id, data=True):
+            if d.get("type") == "transfer":
+                ts = d.get("timestamp")
+                if ts and ts >= cutoff:
+                    senders.add(u)
+        return len(senders)
 
     def get_total_outflow(self, client_id: str, current_time: datetime, window_hours: int = 24) -> float:
         """

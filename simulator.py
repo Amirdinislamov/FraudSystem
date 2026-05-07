@@ -1,18 +1,55 @@
+"""
+Симулятор нагрузки. Отправляет транзакции в API строго в хронологическом
+порядке (sequential). Это критично: ядро использует онлайн-статистику
+(Welford, Geo-velocity, Poisson, Circular Time, Daily Volume, Graph Cycle),
+которая становится невалидной при перестановке событий во времени.
+
+Параллелизм через ThreadPoolExecutor + as_completed нарушает порядок
+поступления и приводит к некорректным признакам в ml_dataset.csv.
+
+Симулятор НЕ молчит про ошибки: первые DEBUG_FAILURE_DUMP неудач
+выводятся целиком (status + body + payload), это позволяет быстро
+найти и устранить причину.
+"""
+
+import json
+import time
+from collections import Counter
+
 import pandas as pd
 import requests
-import time
-import concurrent.futures
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 API_URL = "http://127.0.0.1:8000/api/v1/analyze"
-
-session = requests.Session()
-adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
-session.mount("http://", adapter)
+DEBUG_FAILURE_DUMP = 5  
 
 
-def send_tx(row):
-    payload = {
+def make_session() -> requests.Session:
+    """Сессия с автоматическим переподключением при сбросе соединения.
+
+    Без retry на длинной симуляции часть запросов теряется не по вине
+    бизнес-логики, а из-за keep-alive: сервер закрывает идле-соединение,
+    клиент шлёт в дохлый сокет, получает ConnectionResetError. Retry со
+    встроенным back-off снимает 99% таких сбоев.
+    """
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.2,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["POST"],
+    )
+    adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retry)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
+
+
+def build_payload(row):
+    return {
         "transaction_id": str(row["transaction_id"]),
         "client_id": str(row["client_id"]),
         "amount_usd": float(row["amount_usd"]),
@@ -25,36 +62,69 @@ def send_tx(row):
         "device_id": str(row["device_id"]) if pd.notna(row.get("device_id")) else None,
         "timestamp": str(row["timestamp"]).replace(" ", "T"),
     }
-    try:
-        r = session.post(API_URL, json=payload, timeout=5)
-        if r.status_code == 200:
-            return r.json(), int(row["is_fraud"]), str(row.get("scenario", "Unknown"))
-        return None
-    except Exception as e:
-        return None
 
 
 def run_full_load_test():
     df = pd.read_csv("heavy_fraud_data.csv")
-    print(f"🚀 ЗАПУСК ПОЛНОМАСШТАБНОГО ТЕСТА: {len(df)} транзакций...")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    print(f"🚀 Запуск симуляции (sequential): {len(df)} транзакций...")
 
+    session = make_session()
     start_time = time.time()
     results = []
+    failure_examples = []  
+    failure_kinds = Counter()  
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(send_tx, row) for _, row in df.iterrows()]
+    total = len(df)
+    for idx, row in df.iterrows():
+        payload = build_payload(row)
+        try:
+            r = session.post(API_URL, json=payload, timeout=15)
+            if r.status_code == 200:
+                results.append((r.json(), int(row["is_fraud"]), str(row.get("scenario", "Unknown"))))
+            else:
+                failure_kinds[f"HTTP {r.status_code}"] += 1
+                if len(failure_examples) < DEBUG_FAILURE_DUMP:
+                    failure_examples.append({
+                        "row_idx": int(idx),
+                        "status": r.status_code,
+                        "body": r.text[:500],
+                        "payload": payload,
+                    })
+        except requests.exceptions.RequestException as e:
+            failure_kinds[type(e).__name__] += 1
+            if len(failure_examples) < DEBUG_FAILURE_DUMP:
+                failure_examples.append({
+                    "row_idx": int(idx),
+                    "status": "EXC",
+                    "body": f"{type(e).__name__}: {e}",
+                    "payload": payload,
+                })
 
-        processed = 0
-        total = len(df)
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                results.append(res)
-            processed += 1
-            if processed % 2000 == 0:
-                print(f"⏳ Обработано: {processed} / {total}...")
+        if (idx + 1) % 2000 == 0:
+            elapsed = time.time() - start_time
+            rps = (idx + 1) / elapsed if elapsed > 0 else 0.0
+            failed_so_far = sum(failure_kinds.values())
+            print(f"⏳ {idx + 1}/{total}  |  {rps:.1f} tx/s  |  ошибок: {failed_so_far}")
 
     duration = time.time() - start_time
+    total_failures = sum(failure_kinds.values())
+
+    if total_failures:
+        print("\n" + "─" * 60)
+        print(f"⚠️  Категории ошибок ({total_failures} всего):")
+        for kind, n in failure_kinds.most_common():
+            print(f"   {kind:25s} {n}")
+        print("\nПервые ошибки целиком:")
+        for ex in failure_examples:
+            print(f"\n  row #{ex['row_idx']}  status={ex['status']}")
+            print(f"  body: {ex['body']}")
+            print(f"  payload: {json.dumps(ex['payload'], default=str)[:300]}")
+        print("─" * 60)
+
+    if not results:
+        print("\n❌ Ни одного успешного ответа от API. Запустите uvicorn app.main:app")
+        return
 
     res_df = pd.DataFrame([
         {
@@ -66,26 +136,27 @@ def run_full_load_test():
     ])
 
     print("\n" + "=" * 60)
-    print("📊 ГЕНЕРАЛЬНЫЙ ОТЧЕТ (ДИПЛОМ)")
+    print("📊 ГЕНЕРАЛЬНЫЙ ОТЧЁТ (heuristic-only baseline)")
     print("=" * 60)
 
     for name, group in res_df.groupby("scenario"):
         total_g = len(group)
         if name == "Normal":
             fp = len(group[group["predicted_decision"] == "DECLINED"])
-            print(f"✅ {name:25}: Ложных блокировок: {fp}/{total_g} ({fp/total_g*100:.2f}%)")
+            print(f"✅ {name:25}: ложных блокировок: {fp}/{total_g} ({fp/total_g*100:.2f}%)")
         else:
             caught = len(group[group["predicted_decision"] != "APPROVED"])
-            print(f"🚨 {name:25}: Поймано {caught}/{total_g} ({caught/total_g*100:.1f}%)")
+            print(f"🚨 {name:25}: поймано {caught}/{total_g} ({caught/total_g*100:.1f}%)")
 
     total_fraud_actual = len(res_df[res_df["actual_fraud"] == 1])
     caught_total = len(res_df[(res_df["actual_fraud"] == 1) & (res_df["predicted_decision"] != "APPROVED")])
 
     print("\n" + "=" * 60)
-    print(f"⚡ СКОРОСТЬ: {len(results)/duration:.1f} транзакций/сек")
-    print(f"🎯 ОБЩИЙ RECALL: {caught_total/total_fraud_actual:.1%}")
+    print(f"⚡ Скорость: {len(results)/duration:.1f} tx/s   |   успех: {len(results)}/{total}   |   ошибок: {total_failures}")
+    if total_fraud_actual:
+        print(f"🎯 Recall (любой alert): {caught_total/total_fraud_actual:.1%}")
     print("=" * 60)
-    print("\n💾 Сохранение датасета для обучения ML (rule_raw_values)...")
+    print("\n💾 Сохранение датасета признаков для обучения ML...")
 
     rows = []
     for res_json, actual_fraud, _ in results:
@@ -100,7 +171,7 @@ def run_full_load_test():
         cols = [c for c in ml_df.columns if c != "is_fraud"] + ["is_fraud"]
         ml_df = ml_df[cols]
         ml_df.to_csv("ml_dataset.csv", index=False)
-        print(f"✅ ml_dataset.csv сохранён: {len(ml_df)} строк, {len(ml_df.columns)-1} признаков")
+        print(f"✅ ml_dataset.csv: {len(ml_df)} строк, {len(ml_df.columns) - 1} признаков")
         print(f"   Признаки: {[c for c in ml_df.columns if c != 'is_fraud']}")
 
 

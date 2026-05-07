@@ -79,12 +79,6 @@ class FraudScoringEngine:
             self._update_state(state, tx)
             await self.repo.save_profile(state)
 
-            if receiver_state:
-                if not isinstance(receiver_state.incoming_senders, set):
-                    receiver_state.incoming_senders = set(receiver_state.incoming_senders or [])
-                receiver_state.incoming_senders.add(tx.client_id)
-                await self.repo.save_profile(receiver_state)
-
         self.graph.add_transaction(tx)
 
         return FraudDecision(
@@ -112,6 +106,7 @@ class FraudScoringEngine:
         if tx.terminal_lat is not None and tx.terminal_lon is not None:
             state.last_geo_lat = tx.terminal_lat
             state.last_geo_lon = tx.terminal_lon
+            state.last_geo_timestamp = tx.timestamp
 
         current_date = tx.timestamp.strftime("%Y-%m-%d")
         if state.last_day_date == current_date:
@@ -134,3 +129,9 @@ class FraudScoringEngine:
 
         if tx.transfer_purpose:
             state.used_transfer_purposes.add(tx.transfer_purpose.value)
+
+        amt = float(tx.amount_usd)
+        if amt > 0:
+            first = int(str(amt).lstrip("0.").lstrip(".")[0]) if amt < 1 else int(str(int(amt))[0])
+            if 1 <= first <= 9:
+                state.first_digit_counts[first - 1] += 1

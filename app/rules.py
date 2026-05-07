@@ -39,7 +39,7 @@ class ZScoreAmountRule(BaseFraudRule):
         if not mcc_stats or mcc_stats.count < 3:
             return RuleResult(rule_name=self.rule_name, score=0, raw_value=0.0)
 
-        variance = mcc_stats.m2 / mcc_stats.count
+        variance = mcc_stats.m2 / (mcc_stats.count - 1)
         sigma = math.sqrt(variance) if variance > 0 else 0.0
         if sigma == 0:
             return RuleResult(rule_name=self.rule_name, score=0, raw_value=0.0)
@@ -64,7 +64,7 @@ class GeoVelocityRule(BaseFraudRule):
         if (
             state.last_geo_lat is None
             or tx.terminal_lat is None
-            or state.last_tx_timestamp is None
+            or state.last_geo_timestamp is None
         ):
             return RuleResult(rule_name=self.rule_name, score=0, raw_value=0.0)
 
@@ -76,7 +76,7 @@ class GeoVelocityRule(BaseFraudRule):
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
         dist_km = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-        elapsed_sec = (tx.timestamp - state.last_tx_timestamp).total_seconds()
+        elapsed_sec = (tx.timestamp - state.last_geo_timestamp).total_seconds()
         hours = elapsed_sec / 3600.0
         speed_kmh = dist_km / hours if hours > 0 else dist_km * 9999
 
@@ -208,10 +208,63 @@ class DailyVolumeSpikeRule(BaseFraudRule):
         return RuleResult(rule_name=self.rule_name, score=score, raw_value=new_total, reason=reason)
 
 
+class BenfordsLawRule(BaseFraudRule):
+    """
+    Закон Бенфорда. Распределение первой значащей цифры в естественных
+    финансовых данных подчиняется P(d) = log10(1 + 1/d).
+
+    Гипотеза: фабрикованные / синтетические транзакции (например, мошеннические
+    выводы со взломанного аккаунта или искусственные «суммы» при отмывании)
+    сильно отклоняются от закона Бенфорда.
+
+    Метрика — статистика хи-квадрат: χ² = Σ (O_i − E_i)² / E_i.
+    Для df=8 и α=0.01 критическое значение ≈ 20.09.
+    Срабатывает только при достаточной истории (≥ 25 транзакций),
+    иначе оценка ненадёжна.
+    """
+
+
+    EXPECTED = [math.log10(1 + 1.0 / d) for d in range(1, 10)]
+    MIN_HISTORY = 25
+    THRESHOLD_CHI2 = 20.09  
+
+    @property
+    def rule_name(self) -> str:
+        return "BENFORD_LAW_ANOMALY"
+
+    async def evaluate(self, tx, state, receiver_state=None, graph=None) -> RuleResult:
+        counts = state.first_digit_counts
+        n = sum(counts)
+        if n < self.MIN_HISTORY:
+            return RuleResult(rule_name=self.rule_name, score=0, raw_value=0.0)
+
+        chi2 = 0.0
+        for i in range(9):
+            expected = self.EXPECTED[i] * n
+            if expected > 0:
+                chi2 += (counts[i] - expected) ** 2 / expected
+
+        score = 0
+        if chi2 > self.THRESHOLD_CHI2:
+            score = min(int((chi2 - self.THRESHOLD_CHI2) * 1.5) + 30, 60)
+        reason = f"χ²={chi2:.1f} (n={n}, threshold={self.THRESHOLD_CHI2})" if score else None
+        return RuleResult(rule_name=self.rule_name, score=score, raw_value=float(chi2), reason=reason)
+
+
 class GraphDropperNetworkRule(BaseFraudRule):
     """
     [ГРАФ] Детекция дропперов — hub-and-spoke паттерн.
-    Получатель принимает деньги от ≥ 3 уникальных отправителей.
+
+    Прогрессивный скоринг по числу уникальных отправителей к получателю:
+        2 senders  → 35 баллов (MANUAL_REVIEW)  — ранний сигнал
+        3 senders  → 70 баллов (DECLINED)        — типичный hub
+        4+ senders → 90 баллов                   — устоявшийся дроппер
+
+    Бинарный порог ≥3 на синтетическом датасете давал recall ≈ 39%
+    на «organic» переводах к дропперам, потому что первые 1–2 жертвы
+    проскакивают как обычный P2P. Прогрессивная шкала ловит раньше,
+    почти не повышая false positives, т.к. для обычных получателей
+    «двух разных отправителей за всю историю» — редкий случай.
     """
 
     @property
@@ -226,9 +279,57 @@ class GraphDropperNetworkRule(BaseFraudRule):
         if not graph.G.has_edge(tx.client_id, tx.receiver_id):
             unique_senders += 1
 
-        score = 90 if unique_senders >= 3 else 0
+        if unique_senders >= 4:
+            score = 90
+        elif unique_senders == 3:
+            score = 70
+        elif unique_senders == 2:
+            score = 35
+        else:
+            score = 0
+
         reason = f"Dropper hub: {unique_senders} unique senders" if score else None
         return RuleResult(rule_name=self.rule_name, score=score, raw_value=float(unique_senders), reason=reason)
+
+
+class ReceiverVelocityRule(BaseFraudRule):
+    """
+    [ГРАФ] Бурст входящих переводов на получателя за короткое окно.
+
+    Если на одного получателя за < 1 часа поступают переводы от ≥ 3
+    разных отправителей — это типичный признак активного дроппера в
+    момент атаки (синхронный вывод средств с скомпрометированных
+    аккаунтов). В отличие от GraphDropperNetworkRule, который смотрит
+    на всю историю, это правило фиксирует моментальный всплеск.
+    """
+
+    WINDOW_HOURS = 1
+
+    @property
+    def rule_name(self) -> str:
+        return "GRAPH_RECEIVER_VELOCITY"
+
+    async def evaluate(self, tx, state, receiver_state=None, graph=None) -> RuleResult:
+        if not tx.receiver_id or not graph:
+            return RuleResult(rule_name=self.rule_name, score=0, raw_value=0.0)
+
+        recent = graph.get_recent_unique_senders(
+            tx.receiver_id, current_time=tx.timestamp, window_hours=self.WINDOW_HOURS
+        )
+        if not graph.G.has_edge(tx.client_id, tx.receiver_id):
+            recent += 1
+
+        if recent >= 5:
+            score = 80
+        elif recent >= 3:
+            score = 60
+        else:
+            score = 0
+        reason = (
+            f"Receiver velocity: {recent} unique senders in last {self.WINDOW_HOURS}h"
+            if score else None
+        )
+        return RuleResult(rule_name=self.rule_name, score=score, raw_value=float(recent), reason=reason)
 
 
 class GraphCycleRule(BaseFraudRule):

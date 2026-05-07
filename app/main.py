@@ -6,8 +6,9 @@ from app.repositories import InMemoryProfileRepository
 from app.rules import (
     ZScoreAmountRule, GeoVelocityRule, PoissonVelocityRule,
     CircularTimeRule, TransferPurposeAnomalyRule, DailyVolumeSpikeRule,
+    BenfordsLawRule,
     GraphDropperNetworkRule, GraphCycleRule, SharedAttributeRule,
-    PageRankAnomalyRule, FanOutSmurfingRule,
+    PageRankAnomalyRule, FanOutSmurfingRule, ReceiverVelocityRule,
 )
 from app.graph import TransactionGraph
 
@@ -35,8 +36,10 @@ active_rules = [
     CircularTimeRule(),
     DailyVolumeSpikeRule(),
     TransferPurposeAnomalyRule(),
+    BenfordsLawRule(),
     # --- Графовые правила ---
     GraphDropperNetworkRule(),
+    ReceiverVelocityRule(),
     GraphCycleRule(),
     SharedAttributeRule(),
     PageRankAnomalyRule(),

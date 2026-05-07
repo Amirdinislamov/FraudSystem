@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 import uuid
 import random
 
-NUM_CLIENTS = 600
-DAYS = 30
+NUM_CLIENTS = 1500
+DAYS = 60
 BASE_LAT, BASE_LON = 41.31, 69.24
 
 MCC_STATS = {
@@ -28,7 +28,6 @@ class Client:
         self.home_lat = BASE_LAT + np.random.normal(0, 0.05)
         self.home_lon = BASE_LON + np.random.normal(0, 0.05)
         
-        # Основные девайсы и IP (для нормального поведения)
         self.devices = [str(uuid.uuid4())[:8] for _ in range(random.randint(1, 2))]
         self.home_ip = generate_random_ip()
         
@@ -51,30 +50,27 @@ def generate_stochastic_data():
     transactions = []
     start_date = datetime.now() - timedelta(days=DAYS)
 
-    droppers = random.sample(clients, 10)
+    droppers = random.sample(clients, 25)
     for d in droppers: d.is_dropper = True
-    
-    ato_victims = random.sample([c for c in clients if not c.is_dropper], 15)
+
+    ato_victims = random.sample([c for c in clients if not c.is_dropper], 38)
     for v in ato_victims:
         v.is_compromised = True
-        v.compromise_day = random.randint(10, 25) 
+        v.compromise_day = random.randint(20, 50)
 
-    # Подготовим бот-ферму: один хакерский девайс и IP для всех скомпрометированных жертв
     bot_farm_device = "HACK_DEV_" + str(uuid.uuid4())[:8]
     bot_farm_ip = generate_random_ip()
 
     print(f"Генерация {DAYS} дней органической жизни для {NUM_CLIENTS} клиентов...")
 
-    # Для генерации циклов (Smurfing): Отмывание денег
     cycle_rings = []
-    for _ in range(5): # 5 колец отмывания
+    for _ in range(12):  
         ring_size = random.randint(3, 5)
         cycle_rings.append(random.sample([c for c in clients if not c.is_dropper], ring_size))
 
     for day in range(DAYS):
         current_date = start_date + timedelta(days=day)
         
-        # 1. Циклы отмывания (Smurfing) раз в несколько дней
         if day % 7 == 0:
             for ring in cycle_rings:
                 cycle_amount = round(np.random.uniform(500, 2000), 2)
@@ -100,7 +96,6 @@ def generate_stochastic_data():
                     })
 
         for c in clients:
-            # 2. Account Takeover (Bot Farm)
             if c.is_compromised and day >= c.compromise_day:
                 distance_shift = random.choice([random.uniform(0.1, 0.5), random.uniform(5, 15)])
                 hacker_lat = c.home_lat + distance_shift
@@ -135,7 +130,6 @@ def generate_stochastic_data():
                     })
                 continue 
 
-            # 3. Organic Transactions
             if random.random() < c.tx_prob:
                 for _ in range(random.randint(1, 3)):
                     hour = int(np.random.normal(c.mean_hour, 2)) % 24
